@@ -1,0 +1,24 @@
+watchdog:
+  enabled: true
+  check_interval_sec: 300       # 5 min
+  max_restart_attempts: 3
+  restart_cooldown_sec: 60
+  auto_restart: true
+  max_memory_mb: 2048
+
+monitor:
+  api_timeout_sec: 10
+  disk_warn_pct: 90.0
+  memory_warn_pct: 85.0
+
+repair:
+  dry_run_by_default: true
+  require_confirmation: true
+  max_log_size_mb: 100
+
+notify:
+  enabled: false
+  webhook_url: ""
+  desktop_notify: true
+
+verbose: false
