@@ -15,7 +15,7 @@ from typing import Callable, Optional
 import psutil
 
 from .config import MaintainerConfig
-from .safety import hermes_running, warn_if_hermes_running
+from .safety import confirm_action as _default_confirm, hermes_running, maintainer_lock, warn_if_hermes_running
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +241,7 @@ def run_repairs(
     """Run repairs. Default is dry-run.
 
     When ``dry_run=False``, safety checks are applied:
+    - Acquires a single-instance lock (``maintainer_lock``).
     - Warns if Hermes is currently running (SQLite mutations are refused per-check).
     - Asks for confirmation via *confirm_fn* (defaults to ``safety.confirm_action``).
     """
@@ -252,14 +253,29 @@ def run_repairs(
         return report
 
     if not dry_run:
-        # Safety: warn if Hermes is running
-        warn_if_hermes_running()
-        # Safety: confirm execution
-        _confirm = confirm_fn if confirm_fn is not None else (lambda a, r: True)
+        # Safety: confirm + lock + warn
+        _confirm = confirm_fn if confirm_fn is not None else _default_confirm
         if not _confirm("Execute repairs (may modify files)", "medium"):
             report.add(RepairAction("all", "medium", "All repair targets", status="skipped", message="Cancelled by user"))
             return report
+        warn_if_hermes_running()
+        try:
+            with maintainer_lock(hermes_home):
+                return _run_repairs_inner(report, hermes_home, target, dry_run)
+        except RuntimeError as e:
+            report.add(RepairAction("all", "high", "All repair targets", status="failed", message=str(e)))
+            return report
 
+    return _run_repairs_inner(report, hermes_home, target, dry_run)
+
+
+def _run_repairs_inner(
+    report: RepairReport,
+    hermes_home: Path,
+    target: Optional[str],
+    dry_run: bool,
+) -> RepairReport:
+    """Actual repair execution (called after safety checks pass)."""
     if target == "cache":
         targets = ["pycache", "node_cache"]
     elif target:

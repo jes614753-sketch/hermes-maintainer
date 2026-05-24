@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import MaintainerConfig
-from .safety import hermes_running, warn_if_hermes_running
+from .safety import hermes_running, maintainer_lock, warn_if_hermes_running
 
 logger = logging.getLogger(__name__)
 
@@ -153,18 +153,18 @@ def create_snapshot(hermes_home: Path, reason: str = "pre-update") -> SnapshotIn
 def _backup_sqlite(src: Path, dst: Path) -> None:
     """Copy a SQLite database safely using the backup API.
 
-    Falls back to ``shutil.copy2`` if the backup API fails (e.g. file is
-    not a valid SQLite database).
+    Raises ``RuntimeError`` if the backup API fails, rather than falling
+    back to an inconsistent raw file copy.
     """
+    src_conn = sqlite3.connect(str(src), timeout=5)
+    dst_conn = sqlite3.connect(str(dst), timeout=5)
     try:
-        src_conn = sqlite3.connect(str(src), timeout=5)
-        dst_conn = sqlite3.connect(str(dst), timeout=5)
         src_conn.backup(dst_conn)
+    except sqlite3.DatabaseError as e:
+        raise RuntimeError(f"SQLite backup failed for {src}: {e}") from e
+    finally:
         dst_conn.close()
         src_conn.close()
-    except Exception:
-        # Fallback: raw copy (may be inconsistent if Hermes is writing)
-        shutil.copy2(src, dst)
 
 
 def list_snapshots(hermes_home: Path) -> list[SnapshotInfo]:
@@ -189,10 +189,26 @@ def list_snapshots(hermes_home: Path) -> list[SnapshotInfo]:
 def rollback(hermes_home: Path, snapshot: Optional[SnapshotInfo] = None) -> UpdateReport:
     """Restore from a snapshot.
 
-    Creates a ``pre-rollback`` snapshot of the current state before
-    overwriting anything, so the rollback itself can be undone.
+    Acquires ``maintainer_lock``, warns if Hermes is running, and creates
+    a ``pre-rollback`` snapshot before overwriting anything.
     """
     report = UpdateReport()
+    warn_if_hermes_running()
+    try:
+        with maintainer_lock(hermes_home):
+            return _rollback_inner(hermes_home, snapshot, report)
+    except RuntimeError as e:
+        report.status = "failed"
+        report.message = str(e)
+        return report
+
+
+def _rollback_inner(
+    hermes_home: Path,
+    snapshot: Optional[SnapshotInfo],
+    report: UpdateReport,
+) -> UpdateReport:
+    """Actual rollback execution (called inside maintainer_lock)."""
     if snapshot is None:
         snapshots = list_snapshots(hermes_home)
         if not snapshots:
@@ -239,12 +255,29 @@ def rollback(hermes_home: Path, snapshot: Optional[SnapshotInfo] = None) -> Upda
 # ── Update execution ───────────────────────────────────────────────────
 
 def run_update(hermes_home: Path, check_only: bool = False) -> UpdateReport:
-    """Check for updates and optionally execute."""
+    """Check for updates and optionally execute.
+
+    When ``check_only=False``, acquires ``maintainer_lock`` and warns if
+    Hermes is running before modifying any files.
+    """
     report = check_for_update(hermes_home)
 
     if check_only or not report.update_available:
         return report
 
+    # Safety: warn + lock
+    warn_if_hermes_running()
+    try:
+        with maintainer_lock(hermes_home):
+            return _run_update_inner(hermes_home, report)
+    except RuntimeError as e:
+        report.status = "failed"
+        report.message = str(e)
+        return report
+
+
+def _run_update_inner(hermes_home: Path, report: UpdateReport) -> UpdateReport:
+    """Actual update execution (called inside maintainer_lock)."""
     # Create snapshot before updating
     try:
         snapshot = create_snapshot(hermes_home, reason="pre-update")

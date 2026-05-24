@@ -1,4 +1,4 @@
-"""Tests for CLI safety integration — lock, confirmation, Hermes detection."""
+"""Tests for CLI safety integration — confirmation prompts at CLI boundary."""
 
 from __future__ import annotations
 
@@ -113,8 +113,7 @@ class TestRollbackSafety:
         assert result.exit_code == 0
 
     @patch("hermes_maintainer.cli.confirm_action", return_value=True)
-    @patch("hermes_maintainer.cli.warn_if_hermes_running", return_value=False)
-    def test_rollback_proceeds(self, mock_warn, mock_confirm, tmp_path):
+    def test_rollback_proceeds(self, mock_confirm, tmp_path):
         """rollback should proceed when confirmed."""
         with patch("hermes_maintainer.cli.load_config") as mock_load:
             cfg = MagicMock()

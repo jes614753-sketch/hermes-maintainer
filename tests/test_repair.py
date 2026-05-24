@@ -2,6 +2,7 @@
 
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -164,3 +165,56 @@ def test_verify_deps_dry_run(tmp_path):
     (venv_dir / "python.exe").write_bytes(b"fake")
     action = verify_deps(tmp_path, dry_run=True)
     assert action.status == "skipped"
+
+
+# ── run_repairs safety integration ────────────────────────────────────
+
+def test_run_repairs_execute_acquires_lock(tmp_path):
+    """run_repairs(dry_run=False) should acquire maintainer_lock."""
+    cfg = MaintainerConfig()
+    cfg.hermes_home = tmp_path
+    with patch("hermes_maintainer.repair.maintainer_lock") as mock_lock:
+        mock_lock.return_value.__enter__ = MagicMock()
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+        report = run_repairs(cfg, dry_run=False, confirm_fn=lambda a, r: True)
+    mock_lock.assert_called_once_with(tmp_path)
+
+
+def test_run_repairs_execute_confirm_cancel(tmp_path):
+    """run_repairs(dry_run=False) should skip if confirm_fn returns False."""
+    cfg = MaintainerConfig()
+    cfg.hermes_home = tmp_path
+    report = run_repairs(cfg, dry_run=False, confirm_fn=lambda a, r: False)
+    assert len(report.actions) == 1
+    assert report.actions[0].status == "skipped"
+    assert "Cancelled" in report.actions[0].message
+
+
+def test_run_repairs_execute_uses_default_confirm(tmp_path):
+    """run_repairs(dry_run=False, confirm_fn=None) should use safety.confirm_action."""
+    cfg = MaintainerConfig()
+    cfg.hermes_home = tmp_path
+    with patch("hermes_maintainer.repair._default_confirm", return_value=False) as mock_confirm:
+        report = run_repairs(cfg, dry_run=False, confirm_fn=None)
+    mock_confirm.assert_called()
+    assert report.actions[0].status == "skipped"
+
+
+def test_run_repairs_dry_run_no_lock(tmp_path):
+    """run_repairs(dry_run=True) should NOT acquire lock or confirm."""
+    cfg = MaintainerConfig()
+    cfg.hermes_home = tmp_path
+    with patch("hermes_maintainer.repair.maintainer_lock") as mock_lock:
+        report = run_repairs(cfg, dry_run=True)
+    mock_lock.assert_not_called()
+
+
+def test_run_repairs_lock_failure(tmp_path):
+    """run_repairs should report failure if lock cannot be acquired."""
+    cfg = MaintainerConfig()
+    cfg.hermes_home = tmp_path
+    with patch("hermes_maintainer.repair.maintainer_lock") as mock_lock:
+        mock_lock.return_value.__enter__ = MagicMock(side_effect=RuntimeError("Lock held"))
+        mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+        report = run_repairs(cfg, dry_run=False, confirm_fn=lambda a, r: True)
+    assert any(a.status == "failed" and "Lock held" in a.message for a in report.actions)

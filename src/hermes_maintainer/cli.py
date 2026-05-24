@@ -182,17 +182,11 @@ def update_cmd(
         raise typer.Exit(1)
 
     if not check:
-        # Safety: confirm + lock for actual update
+        # Safety: confirm before update (lock + warn are inside run_update)
         if not confirm_action("Update Hermes (creates snapshot first)", risk="high"):
             console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
-        warn_if_hermes_running()
-        try:
-            with maintainer_lock(cfg.hermes_home):
-                report = run_update(cfg.hermes_home, check_only=False)
-        except RuntimeError as e:
-            console.print(f"[red]{e}[/red]")
-            raise typer.Exit(1)
+        report = run_update(cfg.hermes_home, check_only=False)
     else:
         report = run_update(cfg.hermes_home, check_only=True)
     console.print(f"\n[bold]{report.message}[/bold]")
@@ -209,17 +203,11 @@ def rollback_cmd(verbose: bool = typer.Option(False, "--verbose", "-v")):
         console.print("[red]Hermes home not found[/red]")
         raise typer.Exit(1)
 
-    # Safety: confirm + lock
+    # Safety: confirm before rollback (lock + warn are inside rollback)
     if not confirm_action("Rollback to last snapshot (overwrites current config/db/skills)", risk="high"):
         console.print("[yellow]Cancelled.[/yellow]")
         raise typer.Exit(0)
-    warn_if_hermes_running()
-    try:
-        with maintainer_lock(cfg.hermes_home):
-            report = rollback(cfg.hermes_home)
-    except RuntimeError as e:
-        console.print(f"[red]{e}[/red]")
-        raise typer.Exit(1)
+    report = rollback(cfg.hermes_home)
     console.print(f"\n[bold]{report.message}[/bold]")
     console.print()
 
