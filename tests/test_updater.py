@@ -62,12 +62,14 @@ class TestSnapshots:
         assert len(snaps) == 2
         assert snaps[0].reason == "test2"
 
-    def test_rollback_with_no_snapshots(self, tmp_path):
+    @patch("hermes_maintainer.updater.hermes_running", return_value=False)
+    def test_rollback_with_no_snapshots(self, mock_hr, tmp_path):
         report = rollback(tmp_path)
         assert report.status == "failed"
         assert "No snapshots" in report.message
 
-    def test_rollback_restores_files(self, tmp_path):
+    @patch("hermes_maintainer.updater.hermes_running", return_value=False)
+    def test_rollback_restores_files(self, mock_hr, tmp_path):
         env_file = tmp_path / ".env"
         env_file.write_text("ORIGINAL_KEY=abc\n", encoding="utf-8")
 
@@ -80,7 +82,8 @@ class TestSnapshots:
         assert report.status == "rolled-back"
         assert env_file.read_text(encoding="utf-8") == "ORIGINAL_KEY=abc\n"
 
-    def test_rollback_creates_pre_rollback_snapshot(self, tmp_path):
+    @patch("hermes_maintainer.updater.hermes_running", return_value=False)
+    def test_rollback_creates_pre_rollback_snapshot(self, mock_hr, tmp_path):
         env_file = tmp_path / ".env"
         env_file.write_text("V1\n", encoding="utf-8")
         snap1 = create_snapshot(tmp_path, reason="v1")
@@ -173,7 +176,8 @@ class TestUpdateCheck:
         assert report.status == "unknown"
 
     @patch("hermes_maintainer.updater.get_latest_version_from_github", return_value="0.14.0")
-    def test_run_update_acquires_lock(self, mock_gh, tmp_path):
+    @patch("hermes_maintainer.updater.hermes_running", return_value=False)
+    def test_run_update_acquires_lock(self, mock_hr, mock_gh, tmp_path):
         """run_update should acquire maintainer_lock when updating."""
         agent_dir = tmp_path / "hermes-agent"
         agent_dir.mkdir()
@@ -188,9 +192,38 @@ class TestUpdateCheck:
                 report = run_update(tmp_path, check_only=False)
         mock_lock.assert_called_once_with(tmp_path)
 
+    @patch("hermes_maintainer.updater.get_latest_version_from_github", return_value="0.14.0")
+    @patch("hermes_maintainer.updater.hermes_running", return_value=True)
+    def test_run_update_hermes_running_refused(self, mock_hr, mock_gh, tmp_path):
+        """run_update should refuse when Hermes is running without --force."""
+        agent_dir = tmp_path / "hermes-agent"
+        agent_dir.mkdir()
+        (agent_dir / "pyproject.toml").write_text('version = "0.13.0"\n', encoding="utf-8")
+        report = run_update(tmp_path, check_only=False)
+        assert report.status == "failed"
+        assert "Hermes is running" in report.message
+
+    @patch("hermes_maintainer.updater.get_latest_version_from_github", return_value="0.14.0")
+    @patch("hermes_maintainer.updater.hermes_running", return_value=True)
+    def test_run_update_force_overrides(self, mock_hr, mock_gh, tmp_path):
+        """run_update(force=True) should proceed even when Hermes is running."""
+        agent_dir = tmp_path / "hermes-agent"
+        agent_dir.mkdir()
+        (agent_dir / "pyproject.toml").write_text('version = "0.13.0"\n', encoding="utf-8")
+        with patch("hermes_maintainer.updater.maintainer_lock") as mock_lock:
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            with patch("hermes_maintainer.updater._run_update_inner") as mock_inner:
+                from hermes_maintainer.updater import UpdateReport
+                mock_inner.return_value = UpdateReport(status="updated", message="ok")
+                report = run_update(tmp_path, check_only=False, force=True)
+        assert report.status == "updated"
+        mock_lock.assert_called_once()
+
 
 class TestRollbackLock:
-    def test_rollback_acquires_lock(self, tmp_path):
+    @patch("hermes_maintainer.updater.hermes_running", return_value=False)
+    def test_rollback_acquires_lock(self, mock_hr, tmp_path):
         """rollback should acquire maintainer_lock."""
         with patch("hermes_maintainer.updater.maintainer_lock") as mock_lock:
             mock_lock.return_value.__enter__ = MagicMock()
@@ -203,7 +236,8 @@ class TestRollbackLock:
         mock_lock.assert_called_once_with(tmp_path)
         assert report.status == "rolled-back"
 
-    def test_rollback_lock_failure(self, tmp_path):
+    @patch("hermes_maintainer.updater.hermes_running", return_value=False)
+    def test_rollback_lock_failure(self, mock_hr, tmp_path):
         """rollback should report failure if lock cannot be acquired."""
         with patch("hermes_maintainer.updater.maintainer_lock") as mock_lock:
             mock_lock.return_value.__enter__ = MagicMock(side_effect=RuntimeError("Lock held"))
@@ -211,3 +245,40 @@ class TestRollbackLock:
             report = rollback(tmp_path)
         assert report.status == "failed"
         assert "Lock held" in report.message
+
+    @patch("hermes_maintainer.updater.hermes_running", return_value=True)
+    def test_rollback_hermes_running_refused(self, mock_hr, tmp_path):
+        """rollback should refuse when Hermes is running without --force."""
+        report = rollback(tmp_path)
+        assert report.status == "failed"
+        assert "Hermes is running" in report.message
+
+    @patch("hermes_maintainer.updater.hermes_running", return_value=True)
+    def test_rollback_force_overrides(self, mock_hr, tmp_path):
+        """rollback(force=True) should proceed even when Hermes is running."""
+        with patch("hermes_maintainer.updater.maintainer_lock") as mock_lock:
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            with patch("hermes_maintainer.updater._rollback_inner") as mock_inner:
+                from hermes_maintainer.updater import UpdateReport
+                mock_inner.return_value = UpdateReport(status="rolled-back", message="ok")
+                report = rollback(tmp_path, force=True)
+        assert report.status == "rolled-back"
+        mock_lock.assert_called_once()
+
+    def test_rollback_snapshot_failure_aborts(self, tmp_path):
+        """rollback should abort if pre-rollback snapshot creation fails."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("ORIGINAL\n", encoding="utf-8")
+        snap = create_snapshot(tmp_path, reason="backup")
+        env_file.write_text("MODIFIED\n", encoding="utf-8")
+
+        # Patch create_snapshot to fail inside _rollback_inner
+        with patch("hermes_maintainer.updater.create_snapshot", side_effect=RuntimeError("disk full")):
+            with patch("hermes_maintainer.updater.hermes_running", return_value=False):
+                report = rollback(tmp_path, snapshot=snap)
+
+        assert report.status == "failed"
+        assert "Pre-rollback snapshot failed" in report.message
+        # Original file must NOT be overwritten
+        assert env_file.read_text(encoding="utf-8") == "MODIFIED\n"

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import MaintainerConfig
-from .safety import hermes_running, maintainer_lock, warn_if_hermes_running
+from .safety import hermes_running, maintainer_lock
 
 logger = logging.getLogger(__name__)
 
@@ -186,14 +186,18 @@ def list_snapshots(hermes_home: Path) -> list[SnapshotInfo]:
     return snapshots
 
 
-def rollback(hermes_home: Path, snapshot: Optional[SnapshotInfo] = None) -> UpdateReport:
+def rollback(hermes_home: Path, snapshot: Optional[SnapshotInfo] = None, *, force: bool = False) -> UpdateReport:
     """Restore from a snapshot.
 
-    Acquires ``maintainer_lock``, warns if Hermes is running, and creates
-    a ``pre-rollback`` snapshot before overwriting anything.
+    Acquires ``maintainer_lock``, refuses if Hermes is running (unless
+    ``force=True``), and creates a ``pre-rollback`` snapshot before
+    overwriting anything.  Aborts if the pre-rollback snapshot fails.
     """
     report = UpdateReport()
-    warn_if_hermes_running()
+    if hermes_running() and not force:
+        report.status = "failed"
+        report.message = "Hermes is running — stop it first, or use --force to override"
+        return report
     try:
         with maintainer_lock(hermes_home):
             return _rollback_inner(hermes_home, snapshot, report)
@@ -221,11 +225,13 @@ def _rollback_inner(
     report.current_version = get_current_version(hermes_home)
     report.latest_version = snapshot.version
 
-    # Safety: snapshot current state before overwriting
+    # Safety: snapshot current state before overwriting — MUST succeed
     try:
         create_snapshot(hermes_home, reason="pre-rollback")
     except Exception as e:
-        logger.warning("Could not create pre-rollback snapshot: %s", e)
+        report.status = "failed"
+        report.message = f"Pre-rollback snapshot failed, aborting to prevent data loss: {e}"
+        return report
 
     # Restore files
     files_to_restore = ["config.yaml", ".env", "auth.json"]
@@ -254,19 +260,22 @@ def _rollback_inner(
 
 # ── Update execution ───────────────────────────────────────────────────
 
-def run_update(hermes_home: Path, check_only: bool = False) -> UpdateReport:
+def run_update(hermes_home: Path, check_only: bool = False, *, force: bool = False) -> UpdateReport:
     """Check for updates and optionally execute.
 
-    When ``check_only=False``, acquires ``maintainer_lock`` and warns if
-    Hermes is running before modifying any files.
+    When ``check_only=False``, acquires ``maintainer_lock`` and refuses
+    if Hermes is running (unless ``force=True``).
     """
     report = check_for_update(hermes_home)
 
     if check_only or not report.update_available:
         return report
 
-    # Safety: warn + lock
-    warn_if_hermes_running()
+    # Safety: refuse if Hermes running, then lock
+    if hermes_running() and not force:
+        report.status = "failed"
+        report.message = "Hermes is running — stop it first, or use --force to override"
+        return report
     try:
         with maintainer_lock(hermes_home):
             return _run_update_inner(hermes_home, report)

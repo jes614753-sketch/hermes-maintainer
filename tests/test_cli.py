@@ -1,4 +1,4 @@
-"""Tests for CLI safety integration — confirmation prompts at CLI boundary."""
+"""Tests for CLI safety integration — confirmation prompts, --force, Hermes detection."""
 
 from __future__ import annotations
 
@@ -90,13 +90,49 @@ class TestUpdateSafety:
             cfg.resolve_paths = MagicMock()
             mock_load.return_value = cfg
             with patch("hermes_maintainer.cli.confirm_action") as mock_confirm:
-                with patch("hermes_maintainer.updater.check_for_update") as mock_check:
-                    mock_check.return_value = MagicMock(
-                        status="up-to-date", message="ok", update_available=False
+                with patch("hermes_maintainer.cli.run_update") as mock_update:
+                    mock_update.return_value = MagicMock(
+                        status="up-to-date", message="ok", snapshot_path=""
                     )
                     result = runner.invoke(app, ["update", "--check"])
         assert result.exit_code == 0
         mock_confirm.assert_not_called()
+
+    @patch("hermes_maintainer.cli.confirm_action", return_value=True)
+    def test_update_hermes_running_refused(self, mock_confirm, tmp_path):
+        """update should be refused when Hermes is running (no --force)."""
+        with patch("hermes_maintainer.cli.load_config") as mock_load:
+            cfg = MagicMock()
+            cfg.hermes_home = tmp_path
+            cfg.verbose = False
+            cfg.resolve_paths = MagicMock()
+            mock_load.return_value = cfg
+            with patch("hermes_maintainer.cli.run_update") as mock_update:
+                from hermes_maintainer.updater import UpdateReport
+                mock_update.return_value = UpdateReport(
+                    status="failed", message="Hermes is running — stop it first, or use --force to override"
+                )
+                result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0
+        # Should pass force=False
+        mock_update.assert_called_once_with(tmp_path, check_only=False, force=False)
+
+    @patch("hermes_maintainer.cli.confirm_action", return_value=True)
+    def test_update_force_overrides(self, mock_confirm, tmp_path):
+        """update --force should pass force=True to run_update."""
+        with patch("hermes_maintainer.cli.load_config") as mock_load:
+            cfg = MagicMock()
+            cfg.hermes_home = tmp_path
+            cfg.verbose = False
+            cfg.resolve_paths = MagicMock()
+            mock_load.return_value = cfg
+            with patch("hermes_maintainer.cli.run_update") as mock_update:
+                mock_update.return_value = MagicMock(
+                    status="updated", message="ok", snapshot_path=""
+                )
+                result = runner.invoke(app, ["update", "--force"])
+        assert result.exit_code == 0
+        mock_update.assert_called_once_with(tmp_path, check_only=False, force=True)
 
 
 class TestRollbackSafety:
@@ -121,7 +157,41 @@ class TestRollbackSafety:
             cfg.verbose = False
             cfg.resolve_paths = MagicMock()
             mock_load.return_value = cfg
-            with patch("hermes_maintainer.updater.rollback") as mock_rb:
+            with patch("hermes_maintainer.cli.rollback") as mock_rb:
                 mock_rb.return_value = MagicMock(status="failed", message="No snapshots", snapshot_path="")
                 result = runner.invoke(app, ["rollback"])
         assert result.exit_code == 0
+        mock_rb.assert_called_once_with(tmp_path, force=False)
+
+    @patch("hermes_maintainer.cli.confirm_action", return_value=True)
+    def test_rollback_hermes_running_refused(self, mock_confirm, tmp_path):
+        """rollback should be refused when Hermes is running (no --force)."""
+        with patch("hermes_maintainer.cli.load_config") as mock_load:
+            cfg = MagicMock()
+            cfg.hermes_home = tmp_path
+            cfg.verbose = False
+            cfg.resolve_paths = MagicMock()
+            mock_load.return_value = cfg
+            with patch("hermes_maintainer.cli.rollback") as mock_rb:
+                from hermes_maintainer.updater import UpdateReport
+                mock_rb.return_value = UpdateReport(
+                    status="failed", message="Hermes is running — stop it first, or use --force to override"
+                )
+                result = runner.invoke(app, ["rollback"])
+        assert result.exit_code == 0
+        mock_rb.assert_called_once_with(tmp_path, force=False)
+
+    @patch("hermes_maintainer.cli.confirm_action", return_value=True)
+    def test_rollback_force_overrides(self, mock_confirm, tmp_path):
+        """rollback --force should pass force=True."""
+        with patch("hermes_maintainer.cli.load_config") as mock_load:
+            cfg = MagicMock()
+            cfg.hermes_home = tmp_path
+            cfg.verbose = False
+            cfg.resolve_paths = MagicMock()
+            mock_load.return_value = cfg
+            with patch("hermes_maintainer.cli.rollback") as mock_rb:
+                mock_rb.return_value = MagicMock(status="rolled-back", message="ok", snapshot_path="")
+                result = runner.invoke(app, ["rollback", "--force"])
+        assert result.exit_code == 0
+        mock_rb.assert_called_once_with(tmp_path, force=True)

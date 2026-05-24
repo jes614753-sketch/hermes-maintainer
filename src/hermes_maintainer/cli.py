@@ -173,6 +173,7 @@ def repair(
 @app.command("update")
 def update_cmd(
     check: bool = typer.Option(False, "--check", help="Only check, don't update"),
+    force: bool = typer.Option(False, "--force", "-f", help="Proceed even if Hermes is running"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Check for updates and optionally update Hermes."""
@@ -182,11 +183,11 @@ def update_cmd(
         raise typer.Exit(1)
 
     if not check:
-        # Safety: confirm before update (lock + warn are inside run_update)
+        # Safety: confirm before update (lock + refuse are inside run_update)
         if not confirm_action("Update Hermes (creates snapshot first)", risk="high"):
             console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
-        report = run_update(cfg.hermes_home, check_only=False)
+        report = run_update(cfg.hermes_home, check_only=False, force=force)
     else:
         report = run_update(cfg.hermes_home, check_only=True)
     console.print(f"\n[bold]{report.message}[/bold]")
@@ -196,18 +197,21 @@ def update_cmd(
 
 
 @app.command("rollback")
-def rollback_cmd(verbose: bool = typer.Option(False, "--verbose", "-v")):
+def rollback_cmd(
+    force: bool = typer.Option(False, "--force", "-f", help="Proceed even if Hermes is running"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
     """Rollback to last snapshot."""
     cfg = _load_cfg(verbose)
     if cfg.hermes_home is None:
         console.print("[red]Hermes home not found[/red]")
         raise typer.Exit(1)
 
-    # Safety: confirm before rollback (lock + warn are inside rollback)
+    # Safety: confirm before rollback (lock + refuse are inside rollback)
     if not confirm_action("Rollback to last snapshot (overwrites current config/db/skills)", risk="high"):
         console.print("[yellow]Cancelled.[/yellow]")
         raise typer.Exit(0)
-    report = rollback(cfg.hermes_home)
+    report = rollback(cfg.hermes_home, force=force)
     console.print(f"\n[bold]{report.message}[/bold]")
     console.print()
 
