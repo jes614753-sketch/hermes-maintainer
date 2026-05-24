@@ -10,11 +10,12 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import psutil
 
 from .config import MaintainerConfig
+from .safety import hermes_running, warn_if_hermes_running
 
 logger = logging.getLogger(__name__)
 
@@ -234,14 +235,30 @@ def run_repairs(
     cfg: MaintainerConfig,
     target: Optional[str] = None,
     dry_run: bool = True,
+    *,
+    confirm_fn: Optional[Callable[[str, str], bool]] = None,
 ) -> RepairReport:
-    """Run repairs. Default is dry-run."""
+    """Run repairs. Default is dry-run.
+
+    When ``dry_run=False``, safety checks are applied:
+    - Warns if Hermes is currently running (SQLite mutations are refused per-check).
+    - Asks for confirmation via *confirm_fn* (defaults to ``safety.confirm_action``).
+    """
     cfg.resolve_paths()
     report = RepairReport(dry_run=dry_run)
     hermes_home = cfg.hermes_home
     if hermes_home is None:
         report.add(RepairAction("all", "high", "All repair targets", status="failed", message="Hermes home not found"))
         return report
+
+    if not dry_run:
+        # Safety: warn if Hermes is running
+        warn_if_hermes_running()
+        # Safety: confirm execution
+        _confirm = confirm_fn if confirm_fn is not None else (lambda a, r: True)
+        if not _confirm("Execute repairs (may modify files)", "medium"):
+            report.add(RepairAction("all", "medium", "All repair targets", status="skipped", message="Cancelled by user"))
+            return report
 
     if target == "cache":
         targets = ["pycache", "node_cache"]
@@ -253,7 +270,7 @@ def run_repairs(
     for t in targets:
         entry = REPAIR_REGISTRY.get(t)
         if entry is None:
-            report.add(RepairAction(t, "low", f"Unknown repair target: {t}", "skipped"))
+            report.add(RepairAction(t, "low", f"Unknown repair target: {t}", status="skipped"))
             continue
         risk, desc, fn = entry
         if fn is None:

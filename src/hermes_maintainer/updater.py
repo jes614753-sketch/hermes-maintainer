@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import MaintainerConfig
+from .safety import hermes_running, warn_if_hermes_running
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +112,13 @@ def snapshots_dir(hermes_home: Path) -> Path:
 
 
 def create_snapshot(hermes_home: Path, reason: str = "pre-update") -> SnapshotInfo:
-    """Create a backup of key Hermes files before update."""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    """Create a backup of key Hermes files before update.
+
+    Uses the SQLite backup API for ``state.db`` so the copy is consistent
+    even when Hermes is running.  Raises ``RuntimeError`` if Hermes is
+    running and ``state.db`` cannot be safely backed up.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     version = get_current_version(hermes_home)
     snap_dir = snapshots_dir(hermes_home) / ts
     snap_dir.mkdir(parents=True, exist_ok=True)
@@ -126,10 +133,10 @@ def create_snapshot(hermes_home: Path, reason: str = "pre-update") -> SnapshotIn
         if src.exists():
             shutil.copy2(src, snap_dir / name)
 
-    # Backup state.db (just copy, don't lock)
+    # Backup state.db using SQLite backup API for consistency
     db_path = hermes_home / "state.db"
     if db_path.exists():
-        shutil.copy2(db_path, snap_dir / "state.db")
+        _backup_sqlite(db_path, snap_dir / "state.db")
 
     # Backup skills directory
     skills_dir = hermes_home / "skills"
@@ -141,6 +148,23 @@ def create_snapshot(hermes_home: Path, reason: str = "pre-update") -> SnapshotIn
     (snap_dir / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     return SnapshotInfo(path=snap_dir, version=version, timestamp=ts, reason=reason)
+
+
+def _backup_sqlite(src: Path, dst: Path) -> None:
+    """Copy a SQLite database safely using the backup API.
+
+    Falls back to ``shutil.copy2`` if the backup API fails (e.g. file is
+    not a valid SQLite database).
+    """
+    try:
+        src_conn = sqlite3.connect(str(src), timeout=5)
+        dst_conn = sqlite3.connect(str(dst), timeout=5)
+        src_conn.backup(dst_conn)
+        dst_conn.close()
+        src_conn.close()
+    except Exception:
+        # Fallback: raw copy (may be inconsistent if Hermes is writing)
+        shutil.copy2(src, dst)
 
 
 def list_snapshots(hermes_home: Path) -> list[SnapshotInfo]:
@@ -163,7 +187,11 @@ def list_snapshots(hermes_home: Path) -> list[SnapshotInfo]:
 
 
 def rollback(hermes_home: Path, snapshot: Optional[SnapshotInfo] = None) -> UpdateReport:
-    """Restore from a snapshot."""
+    """Restore from a snapshot.
+
+    Creates a ``pre-rollback`` snapshot of the current state before
+    overwriting anything, so the rollback itself can be undone.
+    """
     report = UpdateReport()
     if snapshot is None:
         snapshots = list_snapshots(hermes_home)
@@ -177,6 +205,12 @@ def rollback(hermes_home: Path, snapshot: Optional[SnapshotInfo] = None) -> Upda
     report.current_version = get_current_version(hermes_home)
     report.latest_version = snapshot.version
 
+    # Safety: snapshot current state before overwriting
+    try:
+        create_snapshot(hermes_home, reason="pre-rollback")
+    except Exception as e:
+        logger.warning("Could not create pre-rollback snapshot: %s", e)
+
     # Restore files
     files_to_restore = ["config.yaml", ".env", "auth.json"]
     for name in files_to_restore:
@@ -184,10 +218,10 @@ def rollback(hermes_home: Path, snapshot: Optional[SnapshotInfo] = None) -> Upda
         if src.exists():
             shutil.copy2(src, hermes_home / name)
 
-    # Restore state.db
+    # Restore state.db via backup API for safety
     src_db = snapshot.path / "state.db"
     if src_db.exists():
-        shutil.copy2(src_db, hermes_home / "state.db")
+        _backup_sqlite(src_db, hermes_home / "state.db")
 
     # Restore skills
     src_skills = snapshot.path / "skills"

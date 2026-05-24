@@ -144,15 +144,7 @@ def repair(
     """Auto-repair common issues (dry-run by default)."""
     cfg = _load_cfg(verbose)
 
-    if not dry_run:
-        # Safety: confirm + lock for execute mode
-        if not confirm_action("Execute repairs (may modify files)", risk="medium"):
-            console.print("[yellow]Cancelled.[/yellow]")
-            raise typer.Exit(0)
-        if cfg.hermes_home:
-            warn_if_hermes_running()
-
-    report = run_repairs(cfg, target=target, dry_run=dry_run)
+    report = run_repairs(cfg, target=target, dry_run=dry_run, confirm_fn=confirm_action)
 
     label = "DRY RUN" if report.dry_run else "EXECUTED"
     console.print(f"\n[bold]Repair Report ({label})[/bold]\n")
@@ -209,7 +201,7 @@ def update_cmd(
     console.print()
 
 
-@app.command()
+@app.command("rollback")
 def rollback_cmd(verbose: bool = typer.Option(False, "--verbose", "-v")):
     """Rollback to last snapshot."""
     cfg = _load_cfg(verbose)
@@ -267,6 +259,9 @@ def watchdog_install(
     interval: int = typer.Option(5, "--interval", "-i", help="Check interval in minutes"),
 ):
     """Register watchdog as a scheduled task."""
+    if not confirm_action("Install watchdog (Windows Task Scheduler)", risk="medium"):
+        console.print("[yellow]Cancelled.[/yellow]")
+        raise typer.Exit(0)
     cfg = _load_cfg()
     result = install_watchdog(cfg, interval_minutes=interval)
     console.print(f"[bold]{result.message}[/bold]")
@@ -275,6 +270,9 @@ def watchdog_install(
 @watchdog_app.command("uninstall")
 def watchdog_uninstall_cmd():
     """Remove the watchdog task."""
+    if not confirm_action("Uninstall watchdog (remove scheduled task)", risk="medium"):
+        console.print("[yellow]Cancelled.[/yellow]")
+        raise typer.Exit(0)
     result = uninstall_watchdog()
     console.print(f"[bold]{result.message}[/bold]")
 
