@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-import platform
 import shutil
 import sqlite3
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -212,13 +210,15 @@ def check_environment(hermes_home: Path) -> list[DiagnosticItem]:
             f"Python {ver.major}.{ver.minor}.{ver.micro}",
         ))
 
-    # venv check
-    venv_path = hermes_home / "venv"
-    if not venv_path.exists():
+    # venv check — try hermes-agent/venv first, then hermes_home/venv
+    venv_path = hermes_home / "hermes-agent" / "venv"
+    if not venv_path.is_dir():
+        venv_path = hermes_home / "venv"
+    if not venv_path.is_dir():
         items.append(DiagnosticItem(
             "env", "error", "venv directory missing",
-            f"Expected at {venv_path}",
-            "Run: python -m venv venv && pip install -e '.[all]'",
+            f"Not found at {hermes_home / 'hermes-agent' / 'venv'} or {hermes_home / 'venv'}",
+            "Run: cd hermes-agent && python -m venv venv && pip install -e '.[all]'",
         ))
     else:
         python_exe = venv_path / "Scripts" / "python.exe" if sys.platform == "win32" else venv_path / "bin" / "python"
@@ -348,10 +348,15 @@ def check_network(hermes_home: Path) -> list[DiagnosticItem]:
         try:
             resp = httpx.get(url, timeout=10, follow_redirects=True)
             latency = int(resp.elapsed.total_seconds() * 1000)
-            if resp.status_code < 500:
-                items.append(DiagnosticItem("net", "info", f"{name} reachable", f"{resp.status_code} in {latency}ms"))
+            code = resp.status_code
+            if code == 200:
+                items.append(DiagnosticItem("net", "info", f"{name} healthy", f"HTTP {code} in {latency}ms"))
+            elif code in (401, 403):
+                items.append(DiagnosticItem("net", "warn", f"{name} auth error", f"HTTP {code} in {latency}ms — check API key"))
+            elif code >= 500:
+                items.append(DiagnosticItem("net", "warn", f"{name} server error", f"HTTP {code} in {latency}ms"))
             else:
-                items.append(DiagnosticItem("net", "warn", f"{name} server error", f"HTTP {resp.status_code}"))
+                items.append(DiagnosticItem("net", "info", f"{name} reachable", f"HTTP {code} in {latency}ms"))
         except httpx.TimeoutException:
             items.append(DiagnosticItem("net", "warn", f"{name} timeout", "10s timeout"))
         except httpx.ConnectError as e:
@@ -405,11 +410,13 @@ def run_diagnostics(
         "env": lambda: check_environment(hermes_home) + check_hermes_version(hermes_home),
         "db": lambda: check_database_deep(hermes_home),
         "net": lambda: check_network(hermes_home),
-        "api": lambda: check_network(hermes_home),
         "deps": lambda: check_dependencies(hermes_home),
     }
+    # "api" is an alias for "net"
+    focus_aliases = {"api": "net"}
 
     if focus:
+        focus = focus_aliases.get(focus, focus)
         if focus in checks:
             for item in checks[focus]():
                 report.add(item)

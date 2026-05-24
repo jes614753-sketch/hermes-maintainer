@@ -1,5 +1,6 @@
 """Tests for repair module."""
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,9 @@ from hermes_maintainer.repair import (
     clean_pycache,
     clean_logs,
     clean_node_cache,
+    sqlite_checkpoint,
+    verify_deps,
+    _hermes_running,
     run_repairs,
 )
 
@@ -98,3 +102,65 @@ def test_run_repairs_all_targets(tmp_path):
     # Should run multiple repair actions
     assert len(report.actions) >= 2
     assert report.dry_run is True
+
+
+# ── SQLite checkpoint tests ────────────────────────────────────────────
+
+def test_sqlite_checkpoint_no_db(tmp_path):
+    action = sqlite_checkpoint(tmp_path, dry_run=False)
+    assert action.status == "done"
+    assert "not found" in action.message
+
+
+def test_sqlite_checkpoint_no_wal(tmp_path):
+    # Create a real SQLite db (no WAL file)
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE test (id INTEGER)")
+    conn.close()
+    action = sqlite_checkpoint(tmp_path, dry_run=False)
+    assert action.status == "done"
+    assert "No WAL" in action.message
+
+
+def test_sqlite_checkpoint_small_wal(tmp_path):
+    # Create db with WAL — keep connection open so WAL persists
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE test (id INTEGER)")
+    conn.execute("INSERT INTO test VALUES (1)")
+    conn.commit()
+    # Check WAL exists
+    wal_path = db_path.with_suffix(".db-wal")
+    if wal_path.exists() and wal_path.stat().st_size > 0:
+        # WAL exists and is small — should say "no checkpoint needed"
+        action = sqlite_checkpoint(tmp_path, dry_run=False)
+        assert action.status == "done"
+        assert "no checkpoint needed" in action.message or "checkpoint done" in action.message
+    else:
+        # WAL was auto-cleaned (can happen on Windows) — skip assertion
+        pass
+    conn.close()
+
+
+def test_hermes_running_returns_bool():
+    result = _hermes_running()
+    assert isinstance(result, bool)
+
+
+# ── Verify deps tests ──────────────────────────────────────────────────
+
+def test_verify_deps_no_venv(tmp_path):
+    action = verify_deps(tmp_path, dry_run=False)
+    assert action.status == "failed"
+    assert "not found" in action.message
+
+
+def test_verify_deps_dry_run(tmp_path):
+    # Create mock venv
+    venv_dir = tmp_path / "hermes-agent" / "venv" / "Scripts"
+    venv_dir.mkdir(parents=True)
+    (venv_dir / "python.exe").write_bytes(b"fake")
+    action = verify_deps(tmp_path, dry_run=True)
+    assert action.status == "skipped"

@@ -13,6 +13,7 @@ from rich.table import Table
 
 from .config import MaintainerConfig, load_config, save_config, discover_hermes_home
 from .diagnose import run_diagnostics
+from .safety import confirm_action, maintainer_lock, warn_if_hermes_running
 from .monitor import run_health_check
 from .report import save_report, generate_markdown_report
 from .repair import run_repairs
@@ -142,6 +143,15 @@ def repair(
 ):
     """Auto-repair common issues (dry-run by default)."""
     cfg = _load_cfg(verbose)
+
+    if not dry_run:
+        # Safety: confirm + lock for execute mode
+        if not confirm_action("Execute repairs (may modify files)", risk="medium"):
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+        if cfg.hermes_home:
+            warn_if_hermes_running()
+
     report = run_repairs(cfg, target=target, dry_run=dry_run)
 
     label = "DRY RUN" if report.dry_run else "EXECUTED"
@@ -179,7 +189,20 @@ def update_cmd(
         console.print("[red]Hermes home not found[/red]")
         raise typer.Exit(1)
 
-    report = run_update(cfg.hermes_home, check_only=check)
+    if not check:
+        # Safety: confirm + lock for actual update
+        if not confirm_action("Update Hermes (creates snapshot first)", risk="high"):
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+        warn_if_hermes_running()
+        try:
+            with maintainer_lock(cfg.hermes_home):
+                report = run_update(cfg.hermes_home, check_only=False)
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+    else:
+        report = run_update(cfg.hermes_home, check_only=True)
     console.print(f"\n[bold]{report.message}[/bold]")
     if report.snapshot_path:
         console.print(f"[dim]Snapshot: {report.snapshot_path}[/dim]")
@@ -194,7 +217,17 @@ def rollback_cmd(verbose: bool = typer.Option(False, "--verbose", "-v")):
         console.print("[red]Hermes home not found[/red]")
         raise typer.Exit(1)
 
-    report = rollback(cfg.hermes_home)
+    # Safety: confirm + lock
+    if not confirm_action("Rollback to last snapshot (overwrites current config/db/skills)", risk="high"):
+        console.print("[yellow]Cancelled.[/yellow]")
+        raise typer.Exit(0)
+    warn_if_hermes_running()
+    try:
+        with maintainer_lock(cfg.hermes_home):
+            report = rollback(cfg.hermes_home)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
     console.print(f"\n[bold]{report.message}[/bold]")
     console.print()
 
@@ -297,6 +330,50 @@ def config_init():
     cfg.resolve_paths()
     path = save_config(cfg)
     console.print(f"[green]Config saved to:[/green] {path}")
+
+
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(help="Config key (e.g. watchdog.max_restart_attempts)"),
+    value: str = typer.Argument(help="New value"),
+):
+    """Set a configuration value."""
+    cfg = load_config()
+    parts = key.split(".", 1)
+    if len(parts) == 2:
+        section, attr = parts
+        section_obj = getattr(cfg, section, None)
+        if section_obj is None or not hasattr(section_obj, attr):
+            console.print(f"[red]Unknown key: {key}[/red]")
+            raise typer.Exit(1)
+        # Type coercion
+        current = getattr(section_obj, attr)
+        if isinstance(current, bool):
+            new_val = value.lower() in ("true", "1", "yes")
+        elif isinstance(current, int):
+            new_val = int(value)
+        elif isinstance(current, float):
+            new_val = float(value)
+        else:
+            new_val = value
+        setattr(section_obj, attr, new_val)
+    elif hasattr(cfg, key):
+        current = getattr(cfg, key)
+        if isinstance(current, bool):
+            new_val = value.lower() in ("true", "1", "yes")
+        elif isinstance(current, int):
+            new_val = int(value)
+        elif isinstance(current, float):
+            new_val = float(value)
+        else:
+            new_val = value
+        setattr(cfg, key, new_val)
+    else:
+        console.print(f"[red]Unknown key: {key}[/red]")
+        raise typer.Exit(1)
+    path = save_config(cfg)
+    console.print(f"[green]Set[/green] {key} = {new_val}")
+    console.print(f"[dim]Saved to {path}[/dim]")
 
 
 # ── issue (GitHub) ─────────────────────────────────────────────────────

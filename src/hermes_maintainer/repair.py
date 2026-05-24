@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import psutil
+
 from .config import MaintainerConfig
 
 logger = logging.getLogger(__name__)
@@ -112,6 +114,18 @@ def clean_logs(hermes_home: Path, dry_run: bool, max_size_mb: float = 100) -> Re
     return action
 
 
+def _hermes_running() -> bool:
+    """Check if any Hermes process is currently running."""
+    for proc in psutil.process_iter(["cmdline"]):
+        try:
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+            if "hermes" in cmdline.lower() and "maintainer" not in cmdline.lower():
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return False
+
+
 def sqlite_checkpoint(hermes_home: Path, dry_run: bool) -> RepairAction:
     """Run WAL checkpoint to reduce WAL file size."""
     action = RepairAction("sqlite_checkpoint", "medium", "WAL checkpoint to reduce WAL size")
@@ -129,6 +143,11 @@ def sqlite_checkpoint(hermes_home: Path, dry_run: bool) -> RepairAction:
     if wal_mb < 10:
         action.status = "done"
         action.message = f"WAL is {wal_mb:.1f} MB, no checkpoint needed"
+        return action
+    # Safety: refuse to touch SQLite while Hermes is running
+    if _hermes_running():
+        action.status = "failed"
+        action.message = f"Hermes is running — stop it first before SQLite checkpoint (WAL: {wal_mb:.1f} MB)"
         return action
     if dry_run:
         action.status = "skipped"
@@ -221,7 +240,7 @@ def run_repairs(
     report = RepairReport(dry_run=dry_run)
     hermes_home = cfg.hermes_home
     if hermes_home is None:
-        report.add(RepairAction("all", "high", "Hermes home not found", "failed"))
+        report.add(RepairAction("all", "high", "All repair targets", status="failed", message="Hermes home not found"))
         return report
 
     if target == "cache":

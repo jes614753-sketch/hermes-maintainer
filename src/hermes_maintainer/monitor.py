@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,8 +148,7 @@ def check_sqlite(hermes_home: Path) -> CheckResult:
 
 
 def check_api_connectivity(hermes_home: Path, timeout: int = 10) -> CheckResult:
-    """Check if configured LLM API endpoints are reachable (lightweight ping)."""
-    # Try to read provider config from .env
+    """Check LLM API endpoints — distinguishes network reachability from auth status."""
     env_path = hermes_home / ".env"
     if not env_path.exists():
         return CheckResult("api", "skip", "No .env file found", {})
@@ -166,20 +164,33 @@ def check_api_connectivity(hermes_home: Path, timeout: int = 10) -> CheckResult:
     for name, url in endpoints.items():
         try:
             resp = httpx.get(url, timeout=timeout, follow_redirects=True)
-            results[name] = {"status": resp.status_code, "latency_ms": int(resp.elapsed.total_seconds() * 1000)}
+            code = resp.status_code
+            latency = int(resp.elapsed.total_seconds() * 1000)
+            if code == 200:
+                results[name] = {"status": "ok", "http": code, "latency_ms": latency}
+            elif code in (401, 403):
+                results[name] = {"status": "auth_error", "http": code, "latency_ms": latency}
+            elif code >= 500:
+                results[name] = {"status": "server_error", "http": code, "latency_ms": latency}
+            else:
+                results[name] = {"status": "reachable", "http": code, "latency_ms": latency}
         except httpx.TimeoutException:
-            results[name] = {"status": "timeout", "latency_ms": timeout * 1000}
+            results[name] = {"status": "timeout", "error": f"{timeout}s timeout"}
         except httpx.ConnectError as e:
-            results[name] = {"status": "connect_error", "error": str(e)[:100]}
+            results[name] = {"status": "unreachable", "error": str(e)[:100]}
 
-    reachable = sum(1 for r in results.values() if isinstance(r.get("status"), int) and r["status"] < 500)
     total = len(results)
+    ok_count = sum(1 for r in results.values() if r.get("status") == "ok")
+    reachable_count = sum(1 for r in results.values() if r.get("status") not in ("timeout", "unreachable"))
+    auth_errors = sum(1 for r in results.values() if r.get("status") == "auth_error")
 
-    if reachable == 0:
-        return CheckResult("api", "error", "No API endpoints reachable", results)
-    if reachable < total:
-        return CheckResult("api", "warn", f"{reachable}/{total} endpoints reachable", results)
-    return CheckResult("api", "ok", f"{reachable}/{total} endpoints reachable", results)
+    if reachable_count == 0:
+        return CheckResult("api", "error", "No API endpoints reachable (network issue)", results)
+    if auth_errors > 0:
+        return CheckResult("api", "warn", f"{auth_errors}/{total} endpoints have auth errors (check API keys)", results)
+    if ok_count < total:
+        return CheckResult("api", "warn", f"{ok_count}/{total} endpoints fully healthy", results)
+    return CheckResult("api", "ok", f"{ok_count}/{total} endpoints healthy", results)
 
 
 def check_disk(hermes_home: Path, warn_pct: float = 90.0) -> CheckResult:
